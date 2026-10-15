@@ -2188,6 +2188,8 @@ def _get_usage(agent) -> dict:
     g = lambda k, fb=None: getattr(agent, k, 0) or (getattr(agent, fb, 0) if fb else 0)
     usage = {
         "model": getattr(agent, "model", "") or "",
+        "provider": getattr(agent, "provider", "") or "",
+        "latest_model_call": getattr(agent, "_latest_model_call_receipt", None),
         "input": g("session_input_tokens", "session_prompt_tokens"),
         "output": g("session_output_tokens", "session_completion_tokens"),
         "reasoning": g("session_reasoning_tokens"), "prompt": g("session_prompt_tokens"),

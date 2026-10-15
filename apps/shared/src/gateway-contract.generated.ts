@@ -557,6 +557,8 @@ export interface ProjectRef {
 /** ``tui_gateway/server.py::_get_usage`` + ``agent/context_breakdown.py::context_usage_fields``. */
 export interface Usage {
   model?: string
+  provider?: string
+  latest_model_call?: ModelCallReceipt | null
   input?: number
   output?: number
   reasoning?: number
@@ -579,6 +581,27 @@ export interface Usage {
   dev_credits_spent_micros?: number | null
   cost_usd?: number | null
   cost_status?: string | null
+  [key: string]: unknown
+}
+/** One completed provider API call, with explicit routing and billing provenance. */
+export interface ModelCallReceipt {
+  call_index: number
+  requested_model: string
+  requested_provider: string
+  served_model?: string | null
+  served_provider?: string | null
+  response_id?: string | null
+  upstream_api_base?: string | null
+  input_tokens?: number | null
+  output_tokens?: number | null
+  cache_read_tokens?: number | null
+  cache_write_tokens?: number | null
+  reasoning_tokens?: number | null
+  total_tokens?: number | null
+  cost_usd?: number | null
+  cost_status: string
+  cost_source: string
+  attempted_fallbacks?: number | null
   [key: string]: unknown
 }
 export interface McpServerStatus {
@@ -3403,6 +3426,8 @@ export interface SessionUsageParams {
 }
 export interface SessionUsageResult {
   model?: string
+  provider?: string
+  latest_model_call?: ModelCallReceipt | null
   input?: number
   output?: number
   reasoning?: number

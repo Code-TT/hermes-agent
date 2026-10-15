@@ -21,15 +21,38 @@ SERVED_MODEL_HEADERS: tuple[str, ...] = ("x-litellm-model-id", "x-litellm-model-
 _HOOK_MARK = "_hermes_served_model_hook"
 
 
-def served_model_from_headers(headers: Any) -> Optional[str]:
-    """First non-empty served-model header, or ``None``."""
+def served_model_metadata_from_headers(headers: Any) -> dict[str, Any]:
+    """Extract routing metadata without confusing a proxy alias with a real route."""
     if headers is None or not hasattr(headers, "get"):
-        return None
-    for name in SERVED_MODEL_HEADERS:
-        value = headers.get(name)
-        if value not in (None, ""):
-            return str(value).strip()
-    return None
+        return {"model": None, "api_base": None, "response_cost": None, "attempted_fallbacks": None}
+    model = headers.get("x-litellm-model-id")
+    api_base = headers.get("x-litellm-model-api-base")
+    raw_cost = headers.get("x-litellm-response-cost")
+    try:
+        cost = float(raw_cost) if raw_cost not in (None, "") else None
+        if cost is not None and (cost < 0 or cost != cost or cost == float("inf")):
+            cost = None
+    except (TypeError, ValueError):
+        cost = None
+    raw_fallbacks = headers.get("x-litellm-attempted-fallbacks")
+    try:
+        attempted_fallbacks = int(raw_fallbacks) if raw_fallbacks not in (None, "") else None
+        if attempted_fallbacks is not None and attempted_fallbacks < 0:
+            attempted_fallbacks = None
+    except (TypeError, ValueError):
+        attempted_fallbacks = None
+    return {
+        "model": str(model).strip() if model not in (None, "") else None,
+        "api_base": str(api_base).strip() if api_base not in (None, "") else None,
+        "response_cost": cost,
+        "attempted_fallbacks": attempted_fallbacks,
+    }
+
+
+def served_model_from_headers(headers: Any) -> Optional[str]:
+    """Return LiteLLM deployment id, or its API base if no id was supplied."""
+    metadata = served_model_metadata_from_headers(headers)
+    return metadata["model"] or metadata["api_base"]
 
 
 def install_served_model_capture(agent: Any, client: Any) -> None:
@@ -43,8 +66,14 @@ def install_served_model_capture(agent: Any, client: Any) -> None:
 
     def _on_response(response: Any) -> None:
         try:
+            # Clear before reading each successful response so route headers never leak
+            # from a previous call when this response is missing a LiteLLM field.
             if 200 <= int(getattr(response, "status_code", 0)) < 300:
-                agent.last_served_model = served_model_from_headers(getattr(response, "headers", None))
+                metadata = served_model_metadata_from_headers(getattr(response, "headers", None))
+                agent.last_served_model = metadata["model"]
+                agent.last_served_api_base = metadata["api_base"]
+                agent.last_served_response_cost = metadata["response_cost"]
+                agent.last_attempted_fallbacks = metadata["attempted_fallbacks"]
         except Exception:
             logger.debug("served-model header capture skipped", exc_info=True)
 

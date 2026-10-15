@@ -29,6 +29,49 @@ def _agent_session_source(agent: Any) -> str:
     return session_source_for(getattr(agent, "platform", None))
 
 
+def build_model_call_receipt(
+    agent: Any, response: Any, usage: Any | None, cost: Any | None, *, api_call_count: int
+) -> dict[str, Any]:
+    """Build one request-level receipt; missing route, usage, or cost stays unknown."""
+    served_provider = getattr(response, "provider", None)
+    proxy_cost = getattr(agent, "last_served_response_cost", None)
+    amount = proxy_cost if proxy_cost is not None else getattr(cost, "amount_usd", None)
+    # LiteLLM's response-cost header is its accounting estimate, not the vendor invoice.
+    cost_status = (
+        "estimated" if proxy_cost is not None
+        else str(getattr(cost, "status", "unknown") or "unknown")
+    )
+    cost_source = (
+        "litellm_response_header" if proxy_cost is not None
+        else str(getattr(cost, "source", "none") or "none")
+    )
+    from agent.served_model import served_model_metadata_from_headers
+    route = served_model_metadata_from_headers({
+        "x-litellm-model-id": getattr(agent, "last_served_model", None),
+        "x-litellm-model-api-base": getattr(agent, "last_served_api_base", None),
+        "x-litellm-response-cost": proxy_cost,
+        "x-litellm-attempted-fallbacks": getattr(agent, "last_attempted_fallbacks", None),
+    })
+    return {
+        "call_index": int(api_call_count),
+        "requested_model": str(getattr(agent, "model", "") or ""),
+        "requested_provider": str(getattr(agent, "provider", "") or ""),
+        "served_model": route["model"],
+        "served_provider": str(served_provider) if served_provider else None,
+        "response_id": str(getattr(response, "id", "") or "") or None,
+        "upstream_api_base": route["api_base"],
+        "input_tokens": int(usage.input_tokens) if usage is not None else None,
+        "output_tokens": int(usage.output_tokens) if usage is not None else None,
+        "cache_read_tokens": int(usage.cache_read_tokens) if usage is not None else None,
+        "cache_write_tokens": int(usage.cache_write_tokens) if usage is not None else None,
+        "reasoning_tokens": int(usage.reasoning_tokens) if usage is not None else None,
+        "total_tokens": int(usage.total_tokens) if usage is not None else None,
+        "cost_usd": float(amount) if amount is not None else None,
+        "cost_status": cost_status if amount is not None else "unknown",
+        "cost_source": cost_source if amount is not None else "none",
+        "attempted_fallbacks": route["attempted_fallbacks"],
+    }
+
 @dataclass
 class ResponseUsageOutcome:
     """``compression_attempts`` is the (possibly rearmed-to-zero) budget counter;
@@ -84,6 +127,11 @@ def record_response_usage(
     # must remain observable.
     agent.session_api_calls += 1
     if not (hasattr(response, 'usage') and response.usage):
+        # Still publish a request receipt when usage is omitted: route attribution is
+        # useful, but tokens/cost must stay explicitly unknown rather than zero.
+        agent._latest_model_call_receipt = build_model_call_receipt(
+            agent, response, None, None, api_call_count=agent.session_api_calls
+        )
         if getattr(compressor, "awaiting_real_usage_after_compression", False):
             # No usage -> cannot adjudicate the prior compaction; consume the
             # pending verdict so later readings aren't charged to it and
@@ -229,6 +277,9 @@ def record_response_usage(
     # Cost delta = aggregator + MoA advisor cost (already priced per-advisor at each
     # advisor's own model rate), so state.db's estimated_cost_usd matches the folded
     # token counts.
+    agent._latest_model_call_receipt = build_model_call_receipt(
+        agent, response, aggregator_usage, cost_result, api_call_count=agent.session_api_calls
+    )
     _cost_delta = None
     if cost_result.amount_usd is not None:
         _cost_delta = float(cost_result.amount_usd)
