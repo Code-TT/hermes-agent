@@ -24,9 +24,12 @@ _HOOK_MARK = "_hermes_served_model_hook"
 def served_model_metadata_from_headers(headers: Any) -> dict[str, Any]:
     """Extract routing metadata without confusing a proxy alias with a real route."""
     if headers is None or not hasattr(headers, "get"):
-        return {"model": None, "api_base": None, "response_cost": None, "attempted_fallbacks": None}
+        return {"model": None, "model_name": None, "api_base": None, "response_cost": None, "attempted_fallbacks": None}
     model = headers.get("x-litellm-model-id")
     api_base = headers.get("x-litellm-model-api-base")
+    # LiteLLM names the routed upstream model separately from the opaque deployment id; the id
+    # alone is a 64-char hash that means nothing to a reader, so keep the readable name beside it.
+    model_name = headers.get("x-litellm-model-name")
     raw_cost = headers.get("x-litellm-response-cost")
     try:
         cost = float(raw_cost) if raw_cost not in (None, "") else None
@@ -43,6 +46,7 @@ def served_model_metadata_from_headers(headers: Any) -> dict[str, Any]:
         attempted_fallbacks = None
     return {
         "model": str(model).strip() if model not in (None, "") else None,
+        "model_name": str(model_name).strip() if model_name not in (None, "") else None,
         "api_base": str(api_base).strip() if api_base not in (None, "") else None,
         "response_cost": cost,
         "attempted_fallbacks": attempted_fallbacks,
@@ -71,6 +75,7 @@ def install_served_model_capture(agent: Any, client: Any) -> None:
             if 200 <= int(getattr(response, "status_code", 0)) < 300:
                 metadata = served_model_metadata_from_headers(getattr(response, "headers", None))
                 agent.last_served_model = metadata["model"]
+                agent.last_served_model_name = metadata["model_name"]
                 agent.last_served_api_base = metadata["api_base"]
                 agent.last_served_response_cost = metadata["response_cost"]
                 agent.last_attempted_fallbacks = metadata["attempted_fallbacks"]

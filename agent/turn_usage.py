@@ -55,6 +55,7 @@ def build_model_call_receipt(
     from agent.served_model import served_model_metadata_from_headers
     route = served_model_metadata_from_headers({
         "x-litellm-model-id": getattr(agent, "last_served_model", None),
+        "x-litellm-model-name": getattr(agent, "last_served_model_name", None),
         "x-litellm-model-api-base": getattr(agent, "last_served_api_base", None),
         "x-litellm-response-cost": proxy_cost,
         "x-litellm-attempted-fallbacks": getattr(agent, "last_attempted_fallbacks", None),
@@ -64,6 +65,7 @@ def build_model_call_receipt(
         "requested_model": str(getattr(agent, "model", "") or ""),
         "requested_provider": str(getattr(agent, "provider", "") or ""),
         "served_model": route["model"],
+        "served_model_name": route["model_name"],
         "served_provider": str(served_provider) if served_provider else None,
         "response_id": str(getattr(response, "id", "") or "") or None,
         "upstream_api_base": route["api_base"],

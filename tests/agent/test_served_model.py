@@ -17,15 +17,24 @@ class _Agent:
 def test_litellm_header_metadata_parses_cost_and_fallback_count():
     assert served_model_metadata_from_headers({
         "x-litellm-model-id": "deployment-7",
+        "x-litellm-model-name": "openrouter/deepseek/deepseek-v4-flash",
         "x-litellm-model-api-base": "https://router.example/v1",
         "x-litellm-response-cost": "0.00125",
         "x-litellm-attempted-fallbacks": "2",
     }) == {
         "model": "deployment-7",
+        "model_name": "openrouter/deepseek/deepseek-v4-flash",
         "api_base": "https://router.example/v1",
         "response_cost": 0.00125,
         "attempted_fallbacks": 2,
     }
+
+
+def test_litellm_header_metadata_without_model_name_stays_unknown():
+    """The deployment id is an opaque hash; without the name header the readable route is unknown."""
+    result = served_model_metadata_from_headers({"x-litellm-model-id": "deployment-7"})
+    assert result["model"] == "deployment-7"
+    assert result["model_name"] is None
 
 
 def test_litellm_header_metadata_keeps_invalid_cost_unknown():

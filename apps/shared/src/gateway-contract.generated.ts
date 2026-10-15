@@ -589,6 +589,7 @@ export interface ModelCallReceipt {
   requested_model: string
   requested_provider: string
   served_model?: string | null
+  served_model_name?: string | null
   served_provider?: string | null
   response_id?: string | null
   upstream_api_base?: string | null
