@@ -23581,6 +23581,185 @@
         "title": "MoaReferencePayload",
         "type": "object"
       },
+      "ModelCallReceipt": {
+        "additionalProperties": true,
+        "description": "One completed provider API call, with explicit routing and billing provenance.",
+        "properties": {
+          "call_index": {
+            "title": "Call Index",
+            "type": "integer"
+          },
+          "requested_model": {
+            "title": "Requested Model",
+            "type": "string"
+          },
+          "requested_provider": {
+            "title": "Requested Provider",
+            "type": "string"
+          },
+          "served_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Served Model"
+          },
+          "served_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Served Provider"
+          },
+          "response_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Response Id"
+          },
+          "upstream_api_base": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Upstream Api Base"
+          },
+          "input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Input Tokens"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Output Tokens"
+          },
+          "cache_read_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Cache Read Tokens"
+          },
+          "cache_write_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Cache Write Tokens"
+          },
+          "reasoning_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reasoning Tokens"
+          },
+          "total_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Total Tokens"
+          },
+          "cost_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Cost Usd"
+          },
+          "cost_status": {
+            "title": "Cost Status",
+            "type": "string"
+          },
+          "cost_source": {
+            "title": "Cost Source",
+            "type": "string"
+          },
+          "attempted_fallbacks": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Attempted Fallbacks"
+          }
+        },
+        "required": [
+          "call_index",
+          "requested_model",
+          "requested_provider",
+          "cost_status",
+          "cost_source"
+        ],
+        "title": "ModelCallReceipt",
+        "type": "object"
+      },
       "ModelCapabilities": {
         "additionalProperties": false,
         "description": "``hermes_cli/inventory.py::_apply_capabilities``.",
@@ -38202,6 +38381,22 @@
             "title": "Model",
             "type": "string"
           },
+          "provider": {
+            "default": "",
+            "title": "Provider",
+            "type": "string"
+          },
+          "latest_model_call": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelCallReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "input": {
             "default": 0,
             "title": "Input",
@@ -43760,6 +43955,22 @@
             "default": "",
             "title": "Model",
             "type": "string"
+          },
+          "provider": {
+            "default": "",
+            "title": "Provider",
+            "type": "string"
+          },
+          "latest_model_call": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelCallReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "input": {
             "default": 0,

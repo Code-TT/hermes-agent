@@ -1248,6 +1248,102 @@ def test_get_usage_projects_live_compression_count(count):
     assert server._get_usage(agent)["compressions"] == count
 
 
+def test_get_usage_includes_latest_per_call_receipt_additively():
+    receipt = {
+        "call_index": 3,
+        "requested_model": "plan",
+        "requested_provider": "litellm",
+        "served_model": "deepseek/deepseek-v4-pro",
+        "served_provider": "OpenRouter",
+        "response_id": "req-abc",
+        "upstream_api_base": None,
+        "input_tokens": 900,
+        "output_tokens": 55,
+        "cache_read_tokens": 100,
+        "cache_write_tokens": 10,
+        "reasoning_tokens": 5,
+        "total_tokens": 1065,
+        "cost_usd": 0.001,
+        "cost_status": "estimated",
+        "cost_source": "litellm_response_header",
+        "attempted_fallbacks": 1,
+    }
+    agent = types.SimpleNamespace(
+        model="plan",
+        provider="litellm",
+        _latest_model_call_receipt=receipt,
+        session_input_tokens=900,
+        session_output_tokens=55,
+        session_prompt_tokens=1010,
+        session_completion_tokens=55,
+        session_total_tokens=1065,
+        session_api_calls=3,
+    )
+
+    usage = server._get_usage(agent)
+
+    assert usage["latest_model_call"] == receipt
+    assert usage["input"] == 900
+    assert usage["output"] == 55
+    assert usage["total"] == 1065
+
+
+def test_get_usage_omits_absent_model_call_receipt():
+    agent = types.SimpleNamespace(model="test-model", provider="test-provider")
+
+    usage = server._get_usage(agent)
+
+    assert "latest_model_call" in usage
+    assert usage["latest_model_call"] is None
+
+
+def test_session_usage_rpc_returns_latest_model_call_receipt(monkeypatch):
+    from tui_gateway import server
+
+    receipt = {
+        "call_index": 4,
+        "requested_model": "plan",
+        "requested_provider": "litellm",
+        "served_model": "deepseek/deepseek-v4-pro",
+        "served_provider": "OpenRouter",
+        "response_id": "req-live",
+        "upstream_api_base": None,
+        "input_tokens": 12,
+        "output_tokens": 3,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 15,
+        "cost_usd": 0.0004,
+        "cost_status": "estimated",
+        "cost_source": "litellm_response_header",
+        "attempted_fallbacks": 1,
+    }
+    agent = types.SimpleNamespace(
+        model="plan",
+        provider="litellm",
+        _latest_model_call_receipt=receipt,
+        session_input_tokens=12,
+        session_output_tokens=3,
+        session_prompt_tokens=12,
+        session_completion_tokens=3,
+        session_total_tokens=15,
+        session_api_calls=4,
+        context_compressor=None,
+    )
+    sid = "sid-model-call-receipt"
+    session = _session(agent=agent)
+    server._sessions[sid] = session
+    try:
+        response = server._methods["session.usage"]("request-model-call", {"session_id": sid})
+    finally:
+        server._sessions.pop(sid, None)
+
+    assert "error" not in response, response
+    assert response["result"]["latest_model_call"] == receipt
+    assert response["result"]["total"] == 15
+
+
 def test_usage_ticker_emits_wrapped_usage_payload(monkeypatch):
     # The live ticker must nest the snapshot under a "usage" key, matching the
     # message.complete / session.info payloads the desktop & TUI handlers read

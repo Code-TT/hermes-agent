@@ -5,13 +5,33 @@ from __future__ import annotations
 import httpx
 import openai
 
-from agent.served_model import install_served_model_capture, result_model_fields
+from agent.served_model import install_served_model_capture, result_model_fields, served_model_metadata_from_headers
 
 
 class _Agent:
     model = "hermes-router"
     _fallback_activated = False
     _primary_runtime: dict = {}
+
+
+def test_litellm_header_metadata_parses_cost_and_fallback_count():
+    assert served_model_metadata_from_headers({
+        "x-litellm-model-id": "deployment-7",
+        "x-litellm-model-api-base": "https://router.example/v1",
+        "x-litellm-response-cost": "0.00125",
+        "x-litellm-attempted-fallbacks": "2",
+    }) == {
+        "model": "deployment-7",
+        "api_base": "https://router.example/v1",
+        "response_cost": 0.00125,
+        "attempted_fallbacks": 2,
+    }
+
+
+def test_litellm_header_metadata_keeps_invalid_cost_unknown():
+    result = served_model_metadata_from_headers({"x-litellm-response-cost": "NaN"})
+    assert result["response_cost"] is None
+    assert result["attempted_fallbacks"] is None
 
 
 def test_httpx_hook_captures_litellm_header_and_clears_when_absent():

@@ -16,10 +16,34 @@ class OpenModel(Result):
     model_config = Result.model_config | {"extra": "allow"}
 
 
+class ModelCallReceipt(OpenModel):
+    """One completed provider API call, with explicit routing and billing provenance."""
+
+    call_index: int
+    requested_model: str
+    requested_provider: str
+    served_model: str | None = None
+    served_provider: str | None = None
+    response_id: str | None = None
+    upstream_api_base: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    total_tokens: int | None = None
+    cost_usd: float | None = None
+    cost_status: str
+    cost_source: str
+    attempted_fallbacks: int | None = None
+
+
 class Usage(OpenModel):
     """``tui_gateway/server.py::_get_usage`` + ``agent/context_breakdown.py::context_usage_fields``."""
 
     model: str = ""
+    provider: str = ""
+    latest_model_call: ModelCallReceipt | None = None
     input: int = 0
     output: int = 0
     reasoning: int = 0
