@@ -23609,6 +23609,18 @@
             "default": null,
             "title": "Served Model"
           },
+          "served_model_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Served Model Name"
+          },
           "served_provider": {
             "anyOf": [
               {

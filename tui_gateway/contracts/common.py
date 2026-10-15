@@ -23,6 +23,7 @@ class ModelCallReceipt(OpenModel):
     requested_model: str
     requested_provider: str
     served_model: str | None = None
+    served_model_name: str | None = None
     served_provider: str | None = None
     response_id: str | None = None
     upstream_api_base: str | None = None
