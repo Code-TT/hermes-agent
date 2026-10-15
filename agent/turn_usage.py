@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from contextlib import suppress
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Dict, List
 
 from agent.image_token_cost import calibrate_from_usage
@@ -30,7 +31,8 @@ def _agent_session_source(agent: Any) -> str:
 
 
 def build_model_call_receipt(
-    agent: Any, response: Any, usage: Any | None, cost: Any | None, *, api_call_count: int
+    agent: Any, response: Any, usage: Any | None, cost: Any | None, *, api_call_count: int,
+    additional_cost_usd: Any | None = None,
 ) -> dict[str, Any]:
     """Build one request-level receipt; missing route, usage, or cost stays unknown."""
     served_provider = getattr(response, "provider", None)
@@ -41,10 +43,15 @@ def build_model_call_receipt(
         "estimated" if proxy_cost is not None
         else str(getattr(cost, "status", "unknown") or "unknown")
     )
+    additional_cost = Decimal(str(additional_cost_usd)) if additional_cost_usd is not None else None
+    if amount is not None and additional_cost is not None:
+        amount = Decimal(str(amount)) + additional_cost
     cost_source = (
         "litellm_response_header" if proxy_cost is not None
         else str(getattr(cost, "source", "none") or "none")
     )
+    if additional_cost is not None and additional_cost > 0:
+        cost_source = f"{cost_source}+moa_advisors" if amount is not None else "none"
     from agent.served_model import served_model_metadata_from_headers
     route = served_model_metadata_from_headers({
         "x-litellm-model-id": getattr(agent, "last_served_model", None),
@@ -278,7 +285,12 @@ def record_response_usage(
     # advisor's own model rate), so state.db's estimated_cost_usd matches the folded
     # token counts.
     agent._latest_model_call_receipt = build_model_call_receipt(
-        agent, response, aggregator_usage, cost_result, api_call_count=agent.session_api_calls
+        agent,
+        response,
+        aggregator_usage,
+        cost_result,
+        api_call_count=agent.session_api_calls,
+        additional_cost_usd=_moa_ref_cost,
     )
     _cost_delta = None
     if cost_result.amount_usd is not None:

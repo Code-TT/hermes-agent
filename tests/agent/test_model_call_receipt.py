@@ -41,6 +41,30 @@ def test_receipt_captures_route_tokens_and_cost_provenance():
     }
 
 
+def test_receipt_includes_mixture_of_agents_advisor_cost_in_turn_total():
+    agent = SimpleNamespace(
+        model="moa",
+        provider="moa",
+        last_served_model="openrouter/aggregator-model",
+        last_served_api_base=None,
+        last_served_response_cost=None,
+        last_attempted_fallbacks=None,
+    )
+    response = SimpleNamespace(provider="OpenRouter", id="req-moa")
+    usage = CanonicalUsage(input_tokens=100, output_tokens=20)
+    aggregator_cost = SimpleNamespace(amount_usd=Decimal("0.001"), status="estimated", source="provider_models_api")
+
+    receipt = build_model_call_receipt(
+        agent, response, usage, aggregator_cost, api_call_count=2,
+        additional_cost_usd=Decimal("0.002"),
+    )
+
+    assert receipt["requested_model"] == "moa"
+    assert receipt["served_model"] == "openrouter/aggregator-model"
+    assert receipt["cost_usd"] == 0.003
+    assert receipt["cost_source"] == "provider_models_api+moa_advisors"
+
+
 def test_receipt_keeps_unknown_route_and_cost_unknown_instead_of_guessing():
     agent = SimpleNamespace(
         model="plan",
