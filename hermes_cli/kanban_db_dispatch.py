@@ -76,6 +76,20 @@ _RESPAWN_GUARD_SUCCESS_WINDOW = 3600  # 1 hour
 # ``HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS``.
 DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 300  # 5 minutes
 
+# Konto-Stop-Regel, 429 branch: the rate-limit cooldown DOUBLES per consecutive
+# quota-wall requeue (exponential backoff) and is capped so a stubborn window is
+# probed ever less often but never beyond an hour between probes.
+_RATE_LIMIT_BACKOFF_CAP_SECONDS = 3600  # 1 hour
+
+# Block note when the consecutive ``rate_limited`` streak reaches
+# ``kanban.rate_limit_streak_limit``: Block + Meldung instead of an endless
+# spaced requeue loop (Konto-Stop-Regel; unblock once the quota window reset).
+_RATE_LIMIT_STREAK_BLOCK_REASON = (
+    "Rate-Limit-Streak erschöpft: zu viele aufeinanderfolgende 429-Rate-Limit-Runs "
+    "(exponentieller Backoff ausgereizt) — Karte blockiert, wartet auf Zurücksetzen "
+    "des Quota-Fensters oder manuelles Freigeben."
+)
+
 # Within this window a GitHub PR URL in a comment blocks re-spawn.
 _RESPAWN_GUARD_PR_WINDOW = 86400  # 24 hours
 
@@ -224,6 +238,8 @@ def _classify_worker_exit(pid: int) -> tuple[str, Optional[int]]:
     """``(kind, code)`` for a reaped worker PID: ``clean_exit`` (rc 0 while
     still ``running`` = protocol violation), ``rate_limited``
     (``KANBAN_RATE_LIMIT_EXIT_CODE``, never counts as a failure),
+    ``billing_stop`` (``KANBAN_BILLING_STOP_EXIT_CODE``, 402 empty account —
+    the card blocks with a top-up note instead of requeueing),
     ``nonzero_exit``, ``signaled`` (``code`` is the signal), ``unknown`` (pid
     not in the reap registry; ``code`` None)."""
     entry = _recent_worker_exits.get(int(pid))
@@ -249,6 +265,8 @@ def _exit_code_kind(code: int) -> tuple[str, int]:
         return ("clean_exit", 0)
     if code == _kb.KANBAN_RATE_LIMIT_EXIT_CODE:
         return ("rate_limited", code)
+    if code == _kb.KANBAN_BILLING_STOP_EXIT_CODE:
+        return ("billing_stop", code)
     if code == _kb.KANBAN_TERMINAL_PROVIDER_EXIT_CODE:
         return ("terminal_provider", code)
     return ("nonzero_exit", code)
@@ -1049,12 +1067,20 @@ class _DeadWorker:
     terminal_provider: bool = False
     """``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``: the provider rejected the worker's
     credential/model — trips the breaker on this first occurrence."""
+    billing_stop: bool = False
+    """``KANBAN_BILLING_STOP_EXIT_CODE`` (Konto-Stop-Regel): the provider account is
+    out of credit (402 / mapped ``billing``) — a retry cannot heal it, so the card
+    blocks with kind=transient and the top-up note instead of requeueing."""
 
     @property
     def run_outcome(self) -> str:
         # A rate-limited requeue is recorded as ``rate_limited`` so board history
         # doesn't show a phantom crash for a quota wall.
-        return "rate_limited" if self.rate_limited else "crashed"
+        if self.rate_limited:
+            return "rate_limited"
+        if self.billing_stop:
+            return "blocked"
+        return "crashed"
 
 
 def _classify_dead_worker(
@@ -1122,6 +1148,20 @@ def _classify_dead_worker_exit(
             {"pid": pid, "claimer": claimer, "exit_code": code},
             rate_limited=True,
         )
+    if kind == "billing_stop":
+        # Konto-Stop-Regel: 402 „insufficient credits" — the account itself is
+        # empty. A retry cannot heal it and neither can a fallback model, so
+        # the card BLOCKS (kind=transient, top-up note) instead of requeueing
+        # into the same wall; detect_crashed_workers applies the block after
+        # the reclaim txn.
+        return _DeadWorker(
+            kind, code,
+            f"pid {pid} exited on a 402 billing wall (insufficient credits / quota exceeded) — "
+            "Konto leer, wartet auf Aufladung durch Thomas",
+            "billing_stop",
+            {"pid": pid, "claimer": claimer, "exit_code": code, "billing_stop": True},
+            billing_stop=True,
+        )
     if kind == "terminal_provider":
         # The worker classified its own provider failure as unhealable (credential
         # revoked, model gone): every further spawn would hit the same wall, so
@@ -1153,6 +1193,9 @@ class _CrashSweep:
 
     crashed: list[str] = field(default_factory=list)
     rate_limited: list[str] = field(default_factory=list)
+    # ``(task_id, dead)``: blocked AFTER the txn — a 402 billing stop (Konto-Stop-Regel)
+    # parks the card kind=transient with the top-up note, never a requeue.
+    billing_stop: list[tuple[str, _DeadWorker]] = field(default_factory=list)
     # ``(task_id, pid, claimer, dead_worker)``: accounted after the txn via
     # ``_record_task_failure`` (needs its own write_txn).
     crash_details: list[tuple[str, int, str, _DeadWorker]] = field(default_factory=list)
@@ -1221,7 +1264,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 "outcome": dead.run_outcome,
                 "retry_status": retry_status,
             })
-            if dead.rate_limited or dead.protocol_violation:
+            if dead.rate_limited or dead.protocol_violation or dead.billing_stop:
                 # Stamp last_failure_error WITHOUT touching ``consecutive_failures``:
                 # a rate-limited requeue must show ``check_respawn_guard`` a quota
                 # blocker; a below-budget protocol violation never reaches
@@ -1233,6 +1276,8 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 )
             if dead.rate_limited:
                 sweep.rate_limited.append(row["id"])
+            elif dead.billing_stop:
+                sweep.billing_stop.append((row["id"], dead))
             else:
                 sweep.crashed.append(row["id"])
                 sweep.crash_details.append((row["id"], pid, row["claim_lock"], dead))
@@ -1332,11 +1377,25 @@ def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None
     sweep = _reclaim_dead_workers(conn, board=board)
     # Outside the main txn: account each crash and maybe trip the breaker.
     auto_blocked = _account_crashes(conn, sweep.crash_details) if sweep.crash_details else []
+    # Konto-Stop-Regel: a 402 billing stop blocks the card with kind=transient and
+    # the top-up note. The breaker path (force_trip) parks the card ``blocked`` —
+    # untyped, run already closed as ``blocked`` by the reclaim txn — and
+    # ``block_task`` then classifies it IN PLACE (no synthesized run, no requeue),
+    # mirroring how a terminal-provider crash is typed. Never requeued: an empty
+    # account heals only when Thomas tops it up.
+    for tid, dead in sweep.billing_stop:
+        if _record_task_failure(
+            conn, tid, error=dead.error_text, outcome="blocked",
+            force_trip=True, release_claim=False, end_run=False,
+            event_payload_extra=dict(dead.event_payload),
+        ):
+            _kb.block_task(conn, tid, reason=dead.error_text[:500], kind="transient")
     # Side-channel attributes keep the public ``list[str]`` return stable;
     # ``dispatch_once`` reads them to populate ``DispatchResult``. Rate-limited
     # requeues did NOT count a failure and are NOT crashes.
     detect_crashed_workers._last_auto_blocked = auto_blocked  # type: ignore[attr-defined]
     detect_crashed_workers._last_rate_limited = sweep.rate_limited  # type: ignore[attr-defined]
+    detect_crashed_workers._last_billing_stop = [tid for tid, _ in sweep.billing_stop]  # type: ignore[attr-defined]
     # Fired only now, after the reclaim txn AND breaker accounting have
     # committed, so subscribers always observe fully durable board state.
     if sweep.exited_hook_payloads and _kb._kanban_observer_consumed("on_kanban_worker_exited"):
@@ -1589,6 +1648,7 @@ def check_respawn_guard(
     #    condition is not the card's, so it retries forever, spaced, and never
     #    reaches the breaker.
     rl_cooldown = _kb._resolve_rate_limit_cooldown_seconds()
+    streak_limit = _kb._resolve_rate_limit_streak_limit()
     latest_run = conn.execute(
         "SELECT outcome, ended_at, metadata FROM task_runs "
         "WHERE task_id = ? AND ended_at IS NOT NULL "
@@ -1601,16 +1661,37 @@ def check_respawn_guard(
             if ended_at is not None and (now - ended_at) < rl_cooldown:
                 return "infrastructure_cooldown"
     if latest_run is not None and latest_run["outcome"] == "rate_limited":
+        # Consecutive quota-wall requeue streak: every run since the last real
+        # outcome was booked ``rate_limited``. The Konto-Stop-Regel caps the loop:
+        # cooldown DOUBLES per hit (exponential backoff) and once the streak
+        # reaches ``kanban.rate_limit_streak_limit`` the dispatcher blocks the
+        # card with a message instead of respawning into the same 429 forever.
+        streak = 0
+        for run_row in conn.execute(
+            "SELECT outcome FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL "
+            "ORDER BY ended_at DESC",
+            (task_id,),
+        ):
+            if run_row["outcome"] != "rate_limited":
+                break
+            streak += 1
+        if streak_limit > 0 and streak >= streak_limit:
+            return "rate_limit_streak_exhausted"
         if rl_cooldown <= 0:
             # Cooldown disabled — respawn immediately, skipping blocker_auth so
             # the stamped rate-limit text doesn't re-trap the task.
             return None
         ended_at = _kb._to_epoch(latest_run["ended_at"])
-        if ended_at is not None and (now - ended_at) < rl_cooldown:
+        # Exponential backoff, capped at one hour: the base cooldown doubles per
+        # consecutive hit, so a stubborn quota window is probed ever less often.
+        effective_cooldown = min(
+            rl_cooldown * (2 ** min(streak - 1, 10)), _RATE_LIMIT_BACKOFF_CAP_SECONDS,
+        ) if streak > 0 else rl_cooldown
+        if ended_at is not None and (now - ended_at) < effective_cooldown:
             return "rate_limit_cooldown"
         # Cooldown elapsed — return early so blocker_auth doesn't catch the
-        # stamped rate-limit text; this path intentionally retries forever
-        # (spaced by the cooldown) until quota returns or a real run supersedes it.
+        # stamped rate-limit text; a further probe is allowed until the streak
+        # limit above parks the card.
         return None
 
     # 2. Quota / auth blocker: retrying immediately will not help.  A plain
@@ -2110,6 +2191,11 @@ def _dispatch_lane_task(
         if not dry_run:
             with _kb.write_txn(conn):
                 _kb._append_event(conn, task_id, "respawn_guarded", {"reason": guard_reason})
+            if guard_reason == "rate_limit_streak_exhausted":
+                # Konto-Stop-Regel, 429 branch: the bounded-backoff budget is spent —
+                # Block + Meldung instead of respawning into the same quota window
+                # forever. kind=transient: an operator unblocks once the window reset.
+                _kb.block_task(conn, task_id, reason=_RATE_LIMIT_STREAK_BLOCK_REASON, kind="transient")
         return False
 
     def _count_spawn(name: str) -> None:

@@ -314,10 +314,27 @@ KANBAN_RATE_LIMIT_EXIT_CODE = 75
 # the FIRST occurrence instead of spending ``failure_limit`` identical spawns. 78 == BSD EX_CONFIG.
 KANBAN_TERMINAL_PROVIDER_EXIT_CODE = 78
 
+# Worker exit "provider account is out of credit": 402 „insufficient credits" / „quota exceeded",
+# also when LiteLLM maps the upstream wall to ``failure_reason="billing"`` (Konto-Stop-Regel).
+# A retry cannot heal an empty account and a fallback model would bill the same account, so the
+# dispatcher BLOCKS the card (kind=transient, „Konto leer, wartet auf Aufladung durch Thomas")
+# instead of requeueing it into the same wall. 77 == BSD EX_NOPERM.
+KANBAN_BILLING_STOP_EXIT_CODE = 77
+
+# Consecutive ``rate_limited`` runs (429) before the dispatcher stops the spaced respawn loop
+# and blocks the card with a message (Konto-Stop-Regel: bounded backoff, no endless loop).
+DEFAULT_RATE_LIMIT_STREAK_LIMIT = 5
+
 
 def _resolve_crash_grace_seconds() -> int:
     """``HERMES_KANBAN_CRASH_GRACE_SECONDS`` (0 = immediate, for tests) else default."""
     return _env_int("HERMES_KANBAN_CRASH_GRACE_SECONDS", DEFAULT_CRASH_GRACE_SECONDS)
+
+
+def _resolve_rate_limit_streak_limit() -> int:
+    """``HERMES_KANBAN_RATE_LIMIT_STREAK_LIMIT`` (0 = unbounded forever-loop, pre-fix behavior)
+    else default — max consecutive ``rate_limited`` runs before the card blocks with a message."""
+    return _env_int("HERMES_KANBAN_RATE_LIMIT_STREAK_LIMIT", DEFAULT_RATE_LIMIT_STREAK_LIMIT)
 
 
 def _resolve_rate_limit_cooldown_seconds() -> int:

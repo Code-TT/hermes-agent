@@ -13,7 +13,11 @@ from types import SimpleNamespace
 import pytest
 
 import cli
-from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE, KANBAN_TERMINAL_PROVIDER_EXIT_CODE
+from hermes_cli.kanban_db import (
+    KANBAN_BILLING_STOP_EXIT_CODE,
+    KANBAN_RATE_LIMIT_EXIT_CODE,
+    KANBAN_TERMINAL_PROVIDER_EXIT_CODE,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -45,12 +49,28 @@ def _run_non_quiet(monkeypatch, turn_result):
 
 
 @pytest.mark.parametrize(
-    "reason", ["rate_limit", "upstream_rate_limit", "billing", "overloaded", "server_error", "timeout"]
+    "reason", ["rate_limit", "upstream_rate_limit", "overloaded", "server_error", "timeout"]
 )
 def test_dispatcher_spawned_worker_signals_a_provider_outage_not_a_protocol_violation(monkeypatch, reason):
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_abc123")
     code = _run_non_quiet(monkeypatch, {"failed": True, "failure_reason": reason})
     assert code == KANBAN_RATE_LIMIT_EXIT_CODE
+
+
+def test_dispatcher_spawned_worker_signals_a_billing_stop_not_a_transient(monkeypatch):
+    """Konto-Stop-Regel: ``billing`` (402 insufficient credits / quota exceeded, also via
+    LiteLLM mapping) is NOT a transient quota wall — an empty account can't be retried into
+    working and a fallback model would bill the same account, so the worker exits
+    ``KANBAN_BILLING_STOP_EXIT_CODE`` and the dispatcher BLOCKS the card (kind=transient,
+    "Konto leer, wartet auf Aufladung durch Thomas") instead of requeueing into the same wall.
+    A person's run keeps 1.
+    """
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_abc123")
+    assert _run_non_quiet(
+        monkeypatch, {"failed": True, "failure_reason": "billing"}
+    ) == KANBAN_BILLING_STOP_EXIT_CODE
+    monkeypatch.delenv("HERMES_KANBAN_TASK")
+    assert _run_non_quiet(monkeypatch, {"failed": True, "failure_reason": "billing"}) == 1
 
 
 @pytest.mark.parametrize(

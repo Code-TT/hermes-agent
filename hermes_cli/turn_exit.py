@@ -5,8 +5,14 @@ Worker identity is supplied by the caller, not inferred from a daemon's environm
 
 # Provider walls do not spend a Kanban task's retry budget.
 TRANSIENT_PROVIDER_REASONS = frozenset({
-    "rate_limit", "upstream_rate_limit", "billing", "overloaded", "server_error", "timeout",
+    "rate_limit", "upstream_rate_limit", "overloaded", "server_error", "timeout",
 })
+# 402 „insufficient credits" / „quota exceeded" (Konto-Stop-Regel): the account
+# itself is empty — a retry cannot heal it and neither can a fallback model, so
+# the worker exits ``KANBAN_BILLING_STOP_EXIT_CODE`` and the dispatcher BLOCKS
+# the card (kind=transient, „Konto leer, wartet auf Aufladung durch Thomas")
+# instead of requeueing it into the same wall.
+BILLING_STOP_PROVIDER_REASONS = frozenset({"billing"})
 # These failures need an operator change; the dispatcher parks the task immediately.
 TERMINAL_PROVIDER_REASONS = frozenset({
     "auth", "auth_permanent", "model_not_found", "ssl_cert_verification", "upstream_blocked",
@@ -17,6 +23,7 @@ def turn_exit_code(
     result, *, kanban_worker: bool, credentials_rate_limited: bool = False,
     credentials_terminal: bool = False,
     transient_reasons=TRANSIENT_PROVIDER_REASONS, terminal_reasons=TERMINAL_PROVIDER_REASONS,
+    billing_stop_reasons=BILLING_STOP_PROVIDER_REASONS,
 ) -> int:
     """Preserve completion, interruption and retryable/terminal provider outcomes."""
     if not isinstance(result, dict):
@@ -33,6 +40,9 @@ def turn_exit_code(
         return 0
     if kanban_worker:
         reason = result.get("failure_reason")
+        if reason in billing_stop_reasons:
+            from hermes_cli.kanban_db import KANBAN_BILLING_STOP_EXIT_CODE
+            return KANBAN_BILLING_STOP_EXIT_CODE
         if reason in transient_reasons:
             from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
             return KANBAN_RATE_LIMIT_EXIT_CODE

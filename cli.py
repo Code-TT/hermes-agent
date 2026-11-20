@@ -195,6 +195,7 @@ from hermes_cli.cli_terminal_input import (
     _termux_example_image_path,
 )
 from hermes_cli.cli_single_query import (
+    _BILLING_STOP_PROVIDER_REASONS,
     _TERMINAL_PROVIDER_REASONS,
     _TRANSIENT_PROVIDER_REASONS,
     _collect_kanban_task_images,

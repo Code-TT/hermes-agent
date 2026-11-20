@@ -469,6 +469,134 @@ def test_respawn_guard_defers_rate_limited_within_cooldown(
         assert kbd.check_respawn_guard(conn, tid) is None
 
 
+# ---------------------------------------------------------------------------
+# Konto-Stop-Regel (Thomas, 2026-11-20): an empty provider account must not
+# burn worker spawns. Two branches:
+#   1. ``billing`` (402 insufficient credits / quota exceeded) exits
+#      ``KANBAN_BILLING_STOP_EXIT_CODE`` (77) — the dispatcher BLOCKS the card
+#      kind=transient with a top-up note instead of requeueing it.
+#   2. ``rate_limited`` (429) respawns on an exponential-backoff cooldown that
+#      doubles per consecutive hit (capped at one hour) and the card blocks
+#      with a message once ``kanban.rate_limit_streak_limit`` consecutive hits
+#      are spent — no endless spaced respawn loop.
+# ---------------------------------------------------------------------------
+
+
+def test_billing_stop_exit_blocks_card_transient(kanban_home, monkeypatch):
+    """A worker that exits ``KANBAN_BILLING_STOP_EXIT_CODE`` (402 empty account)
+    BLOCKS the card kind=transient with the top-up note on the first death —
+    never a requeue, never a failure-limit ladder."""
+    import hermes_cli.kanban_db as _kb
+    from hermes_cli import kanban_db_dispatch as _kbd
+
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+
+    with kbc.connect() as conn:
+        host = _kb._claimer_id().split(":", 1)[0]
+        tid = kb.create_task(conn, title="billing", assignee="a", max_retries=5)
+        kb.claim_task(conn, tid, claimer=f"{host}:w0")
+        pid = 72000
+        conn.execute("UPDATE tasks SET worker_pid=? WHERE id=?", (pid, tid))
+        conn.commit()
+        _kbd._record_worker_exit(pid, _exited_status(_kb.KANBAN_BILLING_STOP_EXIT_CODE))
+
+        crashed = kbd.detect_crashed_workers(conn)
+        assert tid in getattr(_kbd.detect_crashed_workers, "_last_billing_stop", [])
+        assert tid not in crashed, "a 402 billing stop must not requeue"
+
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked"
+        assert task.block_kind == "transient"
+        assert "Konto leer" in (task.last_failure_error or "")
+        # The run closed as ``blocked`` (no phantom crash, no requeue ladder).
+        outcomes = [
+            r["outcome"] for r in conn.execute(
+                "SELECT outcome FROM task_runs WHERE task_id=?", (tid,),
+            ).fetchall()
+        ]
+        assert outcomes == ["blocked"]
+
+
+def test_respawn_guard_rate_limit_streak_blocks_after_limit(
+    kanban_home, monkeypatch, all_assignees_spawnable,
+):
+    """After ``HERMES_KANBAN_RATE_LIMIT_STREAK_LIMIT`` consecutive ``rate_limited``
+    runs the guard stops the loop and the dispatcher blocks the card with a
+    message (Block + Meldung) instead of respawning into the same 429 forever."""
+    import hermes_cli.kanban_db as _kb
+    from hermes_cli import kanban_db_dispatch as _kbd
+
+    monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", "300")
+    monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_STREAK_LIMIT", "5")
+    now = 5_000_000
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="rl-streak", assignee="a")
+        for _ in range(5):
+            kb.claim_task(conn, tid)
+            run_id = kb.get_task(conn, tid).current_run_id
+            conn.execute(
+                "UPDATE task_runs SET outcome='rate_limited', status='rate_limited', "
+                "ended_at=? WHERE id=?",
+                (now, run_id),
+            )
+            conn.execute(
+                "UPDATE tasks SET status='ready', current_run_id=NULL, "
+                "claim_lock=NULL, claim_expires=NULL, worker_pid=NULL, "
+                "last_failure_error=? WHERE id=?",
+                ("pid 1 exited rate-limited (quota wall) — requeued", tid),
+            )
+            conn.commit()
+            now += 400  # past the base cooldown every time: the loop survived on spacing alone
+
+        assert kbd.check_respawn_guard(conn, tid) == "rate_limit_streak_exhausted"
+
+        # dispatch_once turns the exhausted streak into a typed transient block.
+        kbd.dispatch_once(conn)
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked"
+        assert task.block_kind == "transient"
+
+
+def test_respawn_guard_rate_limit_cooldown_doubles_per_hit(kanban_home, monkeypatch):
+    """The rate-limit cooldown DOUBLES per consecutive ``rate_limited`` run
+    (exponential backoff), capped at one hour, so a stubborn quota window is
+    probed ever less often until the streak limit parks the card."""
+    import hermes_cli.kanban_db as _kb
+
+    monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", "300")
+    monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_STREAK_LIMIT", "0")  # unbounded: pure backoff check
+    now = 5_000_000
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="rl-backoff", assignee="a")
+        for i, delta in enumerate([400, 700, 1300, 2500, 3800]):
+            kb.claim_task(conn, tid)
+            run_id = kb.get_task(conn, tid).current_run_id
+            conn.execute(
+                "UPDATE task_runs SET outcome='rate_limited', status='rate_limited', "
+                "ended_at=? WHERE id=?",
+                (now + delta, run_id),
+            )
+            conn.execute(
+                "UPDATE tasks SET status='ready', current_run_id=NULL, "
+                "claim_lock=NULL, claim_expires=NULL, worker_pid=NULL, "
+                "last_failure_error=? WHERE id=?",
+                ("pid 1 exited rate-limited (quota wall) — requeued", tid),
+            )
+            conn.commit()
+            now += delta
+            # After hit i the effective cooldown is 300 * 2^i (cap 3600):
+            # i=0 -> 300, i=1 -> 600, i=2 -> 1200, i=3 -> 2400, i=4 -> 3600 (cap).
+            effective = min(300 * (2 ** i), 3600)
+            probed = now + effective - 1
+            monkeypatch.setattr(_kb.time, "time", lambda: probed)
+            assert kbd.check_respawn_guard(conn, tid) == "rate_limit_cooldown"
+            monkeypatch.setattr(_kb.time, "time", lambda: probed + 1)
+            assert kbd.check_respawn_guard(conn, tid) is None
+
+
 @pytest.mark.parametrize(
     "error_text, expected",
     [

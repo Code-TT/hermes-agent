@@ -130,18 +130,25 @@ def _sync_cli_session_id_from_agent(cli) -> None:
 
 
 # ``failure_reason`` values that say nothing about the task itself: the provider is walled,
-# down or unreachable, or the account is out of credit, so a Kanban worker signals "try
-# later" instead of "I failed" and the dispatcher does not spend the task's retry budget on it.
+# down or unreachable, so a Kanban worker signals "try later" instead of "I failed" and the
+# dispatcher does not spend the task's retry budget on it.
 from hermes_cli.turn_exit import TRANSIENT_PROVIDER_REASONS as _TRANSIENT_PROVIDER_REASONS
+
+
+# 402 „insufficient credits" / „quota exceeded" (Konto-Stop-Regel): the account itself is
+# empty, so a retry — and a fallback model, which would bill the same account — can never
+# heal it. A Kanban worker exits ``KANBAN_BILLING_STOP_EXIT_CODE`` so the dispatcher BLOCKS
+# the card (kind=transient, „Konto leer, wartet auf Aufladung durch Thomas") instead of
+# re-spawning into the same wall.
+from hermes_cli.turn_exit import BILLING_STOP_PROVIDER_REASONS as _BILLING_STOP_PROVIDER_REASONS
 
 
 # ``failure_reason`` values a retry can never heal: the credential was rejected, the model does
 # not exist for this account, or the TLS chain is broken. A Kanban worker exits
 # ``KANBAN_TERMINAL_PROVIDER_EXIT_CODE`` so the dispatcher parks the card after ONE spawn with
 # the provider's words as the reason, instead of re-spawning into the same wall until
-# ``kanban.failure_limit`` is spent. ``billing`` stays transient: credit comes back.
-# ``upstream_blocked`` (a WAF/CDN refusing the SDK's User-Agent) is terminal too: only a
-# header change heals it, never a retry.
+# ``kanban.failure_limit`` is spent. ``upstream_blocked`` (a WAF/CDN refusing the SDK's
+# User-Agent) is terminal too: only a header change heals it, never a retry.
 from hermes_cli.turn_exit import TERMINAL_PROVIDER_REASONS as _TERMINAL_PROVIDER_REASONS
 
 
@@ -167,6 +174,7 @@ def _single_query_exit_code(result, *, credentials_rate_limited: bool = False,
     either — the exit mapping and the recovery gate must agree on what a worker is.
     """
     # Late-bound through the ``cli`` facade so a patched ``cli._*_PROVIDER_REASONS`` holds.
+    from cli import _BILLING_STOP_PROVIDER_REASONS as billing_stop_reasons
     from cli import _TERMINAL_PROVIDER_REASONS as terminal_reasons
     from cli import _TRANSIENT_PROVIDER_REASONS as transient_reasons
     from agent.kanban_turn_recovery import kanban_task_id
@@ -177,6 +185,7 @@ def _single_query_exit_code(result, *, credentials_rate_limited: bool = False,
         credentials_terminal=credentials_terminal,
         transient_reasons=transient_reasons,
         terminal_reasons=terminal_reasons,
+        billing_stop_reasons=billing_stop_reasons,
     )
 
 
